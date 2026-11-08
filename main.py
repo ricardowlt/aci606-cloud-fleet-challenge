@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os  # <--- AGREGADO: Necesario para leer variables de entorno
+import joblib # <--- AGREGADO: Para cargar el modelo de ML
+import time # <--- AGREGADO: Para medir el tiempo de inferencia
+
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,10 +12,8 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-# --- NUEVOS IMPORTS PARA LA BASE DE DATOS ---
 from sqlalchemy import create_engine, Column, String, Float
 from sqlalchemy.orm import declarative_base, sessionmaker
-# --------------------------------------------
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
@@ -20,18 +22,17 @@ app = FastAPI(
 )
 
 Status = Literal["NORMAL", "WARNING", "CRITICAL"]
+
 # --- CONFIGURACIÓN DE LA BASE DE DATOS (NEON) ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./local.db")
-# Si no encuentra la variable de entorno (como en Render), usará SQLite local por si acaso.
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Definimos la tabla donde guardaremos la telemetría
 class TelemetryDB(Base):
     __tablename__ = "telemetry"
-    id = Column(String, primary_key=True, index=True) # Usaremos robot_id + timestamp
+    id = Column(String, primary_key=True, index=True)
     robot_id = Column(String, index=True)
     timestamp = Column(Float)
     x = Column(Float)
@@ -43,10 +44,17 @@ class TelemetryDB(Base):
     motor_current = Column(Float)
     obstacle_distance = Column(Float)
 
-# Creamos las tablas en Neon automáticamente
 Base.metadata.create_all(bind=engine)
-# ------------------------------------------------
 
+# --- CARGAR EL MODELO DE ML ---
+MODEL_PATH = os.environ.get("MODEL_PATH", "models/model.joblib")
+try:
+    ml_model = joblib.load(MODEL_PATH)
+    print("✅ Modelo cargado exitosamente.")
+except Exception as e:
+    print(f"⚠️ Error cargando el modelo: {e}")
+    ml_model = None
+# -------------------------------
 
 class Telemetry(BaseModel):
     robot_id: str = Field(min_length=1, max_length=20)
@@ -60,17 +68,12 @@ class Telemetry(BaseModel):
     motor_current: float = Field(ge=0)
     obstacle_distance: float = Field(ge=0)
 
-
 class PredictionRequest(Telemetry):
     pass
 
-
-# Starter storage: intentionally volatile.
-# Students must replace this with persistent storage for the final challenge.
 LATEST: dict[str, Telemetry] = {}
 HISTORY: dict[str, deque[Telemetry]] = defaultdict(lambda: deque(maxlen=100))
 REQUEST_COUNT = 0
-
 
 @app.get("/health")
 def health() -> dict:
@@ -79,22 +82,18 @@ def health() -> dict:
         "service": "aci606-cloud-fleet",
         "version": app.version,
         "robots_in_memory": len(LATEST),
+        "model_loaded": ml_model is not None, # <--- AGREGADO: Para verificar en Render
         "utc": datetime.now(timezone.utc).isoformat(),
     }
-
 
 @app.post("/telemetry")
 def ingest_telemetry(sample: Telemetry) -> dict:
     global REQUEST_COUNT
     REQUEST_COUNT += 1
     
-    # Abrimos la conexión a la base de datos
     db = SessionLocal()
     try:
-        # Creamos un ID único combinando el robot y el tiempo
         unique_id = f"{sample.robot_id}_{sample.timestamp}"
-        
-        # Creamos el registro
         db_telemetry = TelemetryDB(
             id=unique_id,
             robot_id=sample.robot_id,
@@ -104,13 +103,11 @@ def ingest_telemetry(sample: Telemetry) -> dict:
             vibration=sample.vibration, motor_current=sample.motor_current,
             obstacle_distance=sample.obstacle_distance
         )
-        # Lo guardamos en Postgres (Neon)
         db.add(db_telemetry)
         db.commit()
     finally:
         db.close()
 
-    # Seguimos guardando en memoria solo para que el dashboard no se rompa por ahora
     LATEST[sample.robot_id] = sample
     HISTORY[sample.robot_id].append(sample)
     
@@ -121,12 +118,9 @@ def ingest_telemetry(sample: Telemetry) -> dict:
         "note": "Saved to database successfully.",
     }
 
-
-
 @app.get("/robots")
 def list_robots() -> list[dict]:
     return [sample.model_dump() for sample in LATEST.values()]
-
 
 @app.get("/robots/{robot_id}/history")
 def robot_history(robot_id: str) -> list[dict]:
@@ -134,27 +128,44 @@ def robot_history(robot_id: str) -> list[dict]:
         raise HTTPException(status_code=404, detail="Robot not found")
     return [sample.model_dump() for sample in HISTORY[robot_id]]
 
-
 @app.post("/predict")
-def predict(_: PredictionRequest) -> dict:
-    # TODO E4: load the trained model and return a real prediction.
-    # Required contract is documented in README.md and the student guide.
-    raise HTTPException(
-        status_code=501,
-        detail="/predict is part of the challenge. Train and integrate your model.",
-    )
+def predict(sample: PredictionRequest) -> dict:
+    start_time = time.time()
 
+    if ml_model is None:
+        raise HTTPException(status_code=500, detail="Modelo no cargado en el servidor.")
+
+    features = [[
+        sample.speed, sample.battery, sample.motor_temp, 
+        sample.vibration, sample.motor_current, sample.obstacle_distance
+    ]]
+    
+    prediction = ml_model.predict(features)[0]
+    
+    try:
+        probabilities = ml_model.predict_proba(features)[0]
+        confidence = float(max(probabilities))
+    except:
+        confidence = 1.0 
+        
+    inference_ms = (time.time() - start_time) * 1000
+    
+    return {
+        "robot_id": sample.robot_id,
+        "predicted_status": prediction,
+        "confidence": round(confidence, 4),
+        "model_version": "v1",
+        "inference_ms": round(inference_ms, 2)
+    }
 
 @app.get("/metrics")
 def metrics() -> dict:
-    # TODO E4: extend with latency, errors, throughput and model metrics.
     return {
         "requests_received": REQUEST_COUNT,
         "robots_in_memory": len(LATEST),
-        "persistence": "RAM_ONLY",
-        "prediction_service": "NOT_IMPLEMENTED",
+        "persistence": "POSTGRESQL",
+        "prediction_service": "ACTIVE" if ml_model else "ERROR",
     }
-
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard() -> str:
