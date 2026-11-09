@@ -124,39 +124,31 @@ def list_robots() -> list[dict]:
 
 @app.get("/robots/{robot_id}/history")
 def robot_history(robot_id: str) -> list[dict]:
-    if robot_id not in HISTORY:
-        raise HTTPException(status_code=404, detail="Robot not found")
-    return [sample.model_dump() for sample in HISTORY[robot_id]]
-
-@app.post("/predict")
-def predict(sample: PredictionRequest) -> dict:
-    start_time = time.time()
-
-    if ml_model is None:
-        raise HTTPException(status_code=500, detail="Modelo no cargado en el servidor.")
-
-    features = [[
-        sample.speed, sample.battery, sample.motor_temp, 
-        sample.vibration, sample.motor_current, sample.obstacle_distance
-    ]]
-    
-    prediction = ml_model.predict(features)[0]
-    
+    db = SessionLocal()
     try:
-        probabilities = ml_model.predict_proba(features)[0]
-        confidence = float(max(probabilities))
-    except:
-        confidence = 1.0 
+        # Buscamos todos los registros de ese robot en la base de datos, ordenados por tiempo
+        records = db.query(TelemetryDB).filter(TelemetryDB.robot_id == robot_id).order_by(TelemetryDB.timestamp).all()
         
-    inference_ms = (time.time() - start_time) * 1000
-    
-    return {
-        "robot_id": sample.robot_id,
-        "predicted_status": prediction,
-        "confidence": round(confidence, 4),
-        "model_version": "v1",
-        "inference_ms": round(inference_ms, 2)
-    }
+        if not records:
+            raise HTTPException(status_code=404, detail="Robot not found or no history available")
+            
+        # Convertimos los objetos de la base de datos a diccionarios para devolverlos
+        return [
+            {
+                "robot_id": r.robot_id,
+                "timestamp": r.timestamp,
+                "x": r.x,
+                "y": r.y,
+                "speed": r.speed,
+                "battery": r.battery,
+                "motor_temp": r.motor_temp,
+                "vibration": r.vibration,
+                "motor_current": r.motor_current,
+                "obstacle_distance": r.obstacle_distance
+            } for r in records
+        ]
+    finally:
+        db.close()
 
 @app.get("/metrics")
 def metrics() -> dict:
