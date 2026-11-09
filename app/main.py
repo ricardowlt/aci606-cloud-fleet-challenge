@@ -120,8 +120,35 @@ def ingest_telemetry(sample: Telemetry) -> dict:
 
 @app.get("/robots")
 def list_robots() -> list[dict]:
-    return [sample.model_dump() for sample in LATEST.values()]
-
+    db = SessionLocal()
+    try:
+        # Obtenemos el último registro de cada robot usando una subconsulta
+        from sqlalchemy import func
+        
+        # Subconsulta: máximo timestamp por robot
+        subq = db.query(
+            TelemetryDB.robot_id, 
+            func.max(TelemetryDB.timestamp).label('max_ts')
+        ).group_by(TelemetryDB.robot_id).subquery()
+        
+        # Join para obtener los datos completos del último registro
+        records = db.query(TelemetryDB).join(
+            subq, 
+            (TelemetryDB.robot_id == subq.c.robot_id) & (TelemetryDB.timestamp == subq.c.max_ts)
+        ).all()
+        
+        return [
+            {
+                "robot_id": r.robot_id,
+                "timestamp": r.timestamp,
+                "x": r.x, "y": r.y, "speed": r.speed,
+                "battery": r.battery, "motor_temp": r.motor_temp,
+                "vibration": r.vibration, "motor_current": r.motor_current,
+                "obstacle_distance": r.obstacle_distance
+            } for r in records
+        ]
+    finally:
+        db.close()
 @app.get("/robots/{robot_id}/history")
 def robot_history(robot_id: str) -> list[dict]:
     db = SessionLocal()
