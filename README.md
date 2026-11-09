@@ -1,3 +1,21 @@
+# Cloud Fleet Challenge - Despliegue en PaaS
+
+## 🌐 URL del Servicio Desplegado
+El servicio está disponible públicamente en: 
+**https://cloud-fleet-ricardo.onrender.com**
+
+## 🛠️ Arquitectura
+- **Web Service:** Render (Plan gratuito, Python 3)
+- **Base de Datos:** Neon (PostgreSQL, persistencia completa)
+- **Modelo ML:** Random Forest (F1 Macro: 0.8597), guardado en `models/model.joblib`
+
+## 📝 Endpoints Principales
+- `/health`: Estado del servicio y carga del modelo.
+- `/telemetry`: Ingesta de datos y guardado en base de datos.
+- `/predict`: Predicción en tiempo real con el modelo real.
+- `/robots/{id}/history`: Historial completo leído desde PostgreSQL.
+- `/metrics`: Métricas operacionales.
+- `/dashboard`: Panel del operador.
 # ACI606 - Cloud Fleet Challenge
 
 Starter repository for **Exercise 4** of ACI606 Cloud Computing.
